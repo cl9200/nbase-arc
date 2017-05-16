@@ -190,6 +190,7 @@ add_msg_to_send_q (redis_connection * conn, redis_msg * msg)
 
   TAILQ_INSERT_TAIL (&conn->send_q, msg, msg_tqe);
   conn->nsendq++;
+  msg->msg_enqueue_mstime = mstime ();
   msg->in_send_q = 1;
 }
 
@@ -742,6 +743,7 @@ redis_pool_cron (struct aeEventLoop *el, long long id, void *privdata)
 {
   redis_pool *pool = privdata;
   redis_connection *conn, *tvar;
+  redis_msg *msg;
   int *hz = &pool->hz;
   int *cronloops = &pool->cronloops;
   GW_NOTUSED (el);
@@ -779,22 +781,26 @@ redis_pool_cron (struct aeEventLoop *el, long long id, void *privdata)
     long long curtime = mstime ();
     TAILQ_FOREACH_SAFE (conn, &pool->conn_in_service_q, conn_tqe, tvar)
     {
-      // connection list is sorted in assending order by last active time.
-      // So, we can break loop as soon as we find first active connection
-      // in list.
-      if (curtime - conn->last_active_mstime < pool->conn_inactive_timeout)
+      if (conn->nrecvq > 0)
 	{
-	  break;
+	  assert (!TAILQ_EMPTY (&conn->recv_q));
+	  msg = TAILQ_FIRST (&conn->recv_q);
+	}
+      else if (conn->nsendq > 0)
+	{
+	  assert (!TAILQ_EMPTY (&conn->send_q));
+	  msg = TAILQ_FIRST (&conn->send_q);
+	}
+      else
+	{
+	  continue;
 	}
 
-      // If there are waiting msgs in the queue and the connection is inactive,
-      // we should close the connection.
-      if (conn->nsendq + conn->nrecvq > 0)
+      if (curtime - msg->msg_enqueue_mstime > pool->conn_inactive_timeout)
 	{
 	  sds conn_info = get_sds_conn_info (conn);
-
 	  gwlog (GW_WARNING, "Redis is not responding. elapsed:%lld, %s",
-		 curtime - conn->last_active_mstime, conn_info);
+		 curtime - msg->msg_enqueue_mstime, conn_info);
 	  sdsfree (conn_info);
 	  close_conn_and_reconfigure_pool (conn);
 	}
@@ -1347,9 +1353,7 @@ msg_create (redis_pool * pool, sbuf * query, msg_reply_proc * cb, void *cbarg)
   msg->parse_ctx = NULL;
   msg->reply_cb = cb;
   msg->cbarg = cbarg;
-  // TODO Periodically caching mstime() may be possible and will improve
-  // performance by reducing gettimeofday() call.
-  msg->msg_enqueue_mstime = mstime ();
+  msg->msg_enqueue_mstime = 0;
   msg->local = 0;
   msg->in_send_q = 0;
   msg->in_recv_q = 0;
@@ -1504,6 +1508,11 @@ enable_msg_send_handler (redis_connection * conn)
 {
   redis_pool *pool;
 
+  if (conn->delete_asap)
+    {
+      return OK;
+    }
+
   pool = conn->my_pool;
   if (!(aeGetFileEvents (pool->el, conn->fd) & AE_WRITABLE))
     {
@@ -1512,7 +1521,10 @@ enable_msg_send_handler (redis_connection * conn)
 	{
 	  return ERR;
 	}
-      update_conn_last_active (conn);
+      assert(conn->nsendq == 0);
+      if (conn->nrecvq == 0) {
+	  update_conn_last_active (conn);
+      }
     }
   return OK;
 }

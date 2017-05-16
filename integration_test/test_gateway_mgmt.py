@@ -27,6 +27,7 @@ import load_generator
 import config
 import telnetlib
 import random
+import threading
 
 class TestGatewayMgmt(unittest.TestCase):
     cluster = config.clusters[2]
@@ -288,3 +289,31 @@ class TestGatewayMgmt(unittest.TestCase):
 
         if "redis_instances_available:5" not in ret:
             self.assertFalse(True, "Disconnection of timed-out redis is not processed in gateway")
+
+    def pipeline_load_gen(self, gw):
+        for i in range(10):
+            for i in range(100):
+                gw.write("set %d value\r\n" % i)
+            time.sleep(1)
+
+    def test_pgs_del_while_redis_hang(self):
+        util.print_frame()
+
+        server = self.cluster['servers'][0]
+        gw = telnetlib.Telnet(server['ip'], server['gateway_port'])
+        gw_mgmt = telnetlib.Telnet(server['ip'], server['gateway_port']+1)
+        redis = telnetlib.Telnet(server['ip'], server['redis_port'])
+
+        redis.write("debug sleep 100000\r\n")
+
+        th = threading.Thread(target=self.pipeline_load_gen, args=(gw,))
+        th.start()
+
+        time.sleep(1)
+
+        gw_mgmt.write("pgs_del %d %d\r\n" % (server['id'], server['pg_id']))
+        ret = gw_mgmt.read_until("+OK\r\n", 5)
+        util.log("ret = " + ret)
+        self.assertEqual("+OK\r\n", ret, "Fail to execute PGS_DEL command")
+
+        th.join()

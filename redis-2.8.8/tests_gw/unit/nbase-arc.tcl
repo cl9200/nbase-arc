@@ -37,7 +37,7 @@ start_server {tags {"arc_basic"}} {
             set fd2 [socket $::host $::gwport]
             fconfigure $fd2 -encoding binary -translation binary
 
-            for {set i 0} {$i < 100000} {incr i} {
+            for {set i 0} {$i < 10000} {incr i} {
                 set q {}
                 set val "0000${i}0000"
                 append q "SET key $val\r\n"
@@ -48,7 +48,7 @@ start_server {tags {"arc_basic"}} {
             }
             flush $fd2
 
-            for {set i 0} {$i < 100000} {incr i} {
+            for {set i 0} {$i < 10000} {incr i} {
                 gets $fd2 line
                 gets $fd2 count
                 set count [string range $count 1 end]
